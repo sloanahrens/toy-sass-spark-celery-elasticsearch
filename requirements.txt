@@ -13,3 +13,4 @@ itsdangerous==0.24
 kombu==3.0.24
 pytz==2014.10
 redis==2.10.3
+elasticsearch==1.4.0

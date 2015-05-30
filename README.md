@@ -1,3 +1,10 @@
+Toy SASS app using Flask, Celery, Elasticsearch, Apache Spark
+=============================================================
+
+Instructions coming soon
+
+**Adapted From:**
+
 Using Celery with Flask
 =======================
 
