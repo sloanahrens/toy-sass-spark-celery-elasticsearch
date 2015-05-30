@@ -5,7 +5,7 @@ sudo apt-get -y upgrade
 
 sudo apt-get -y install python-setuptools
 sudo easy_install pip
-pip install virtualenv virtualenvwrapper
+sudo pip install virtualenv
 
 virtualenv venv
 . venv/bin/activate

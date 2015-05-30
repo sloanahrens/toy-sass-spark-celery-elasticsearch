@@ -1,10 +1,15 @@
 import os
 import random
 import time
+from datetime import datetime
+
 from flask import Flask, request, render_template, session, flash, redirect, \
     url_for, jsonify
 from flask.ext.mail import Mail, Message
+
 from celery import Celery
+
+from elasticsearch import Elasticsearch
 
 
 app = Flask(__name__)
@@ -31,71 +36,32 @@ celery = Celery(app.name, broker=app.config['CELERY_BROKER_URL'])
 celery.conf.update(app.config)
 
 
-# @celery.task
-# def send_async_email(msg):
-#     """Background task to send an email with Flask-Mail."""
-#     with app.app_context():
-#         mail.send(msg)
-
-
-# @celery.task(bind=True)
-# def long_task(self):
-#     """Background task that runs a long function with progress reports."""
-#     verb = ['Starting up', 'Booting', 'Repairing', 'Loading', 'Checking']
-#     adjective = ['master', 'radiant', 'silent', 'harmonic', 'fast']
-#     noun = ['solar array', 'particle reshaper', 'cosmic ray', 'orbiter', 'bit']
-#     message = ''
-#     total = random.randint(10, 50)
-#     for i in range(total):
-#         if not message or random.random() < 0.25:
-#             message = '{0} {1} {2}...'.format(random.choice(verb),
-#                                               random.choice(adjective),
-#                                               random.choice(noun))
-#         self.update_state(state='PROGRESS',
-#                           meta={'current': i, 'total': total,
-#                                 'status': message})
-#         time.sleep(1)
-#     return {'current': 100, 'total': 100, 'status': 'Task completed!',
-#             'result': 42}
+ES_HOST = {
+    "host" : "localhost", 
+    "port" : 9200
+}
+es = Elasticsearch(hosts = [ES_HOST])
 
 
 @celery.task(bind=True)
-def long_task(self):
+def spark_job_task(self):
 
-    self.update_state(state='PROGRESS',
-                      meta={'current': 25, 'total': 100,
-                            'status': 'Spark task started'})
-    
+    task_id = self.request.id
+
     master_path = 'local[2]'
+
+    project_dir = '~/toy-sass-spark-celery-elasticsearch/'
+
     jar_path = '~/spark/jars/elasticsearch-hadoop-2.1.0.Beta2.jar'
-    code_path = '~/local_code/flask-celery-example/es_spark_test.py'
 
-    os.system("~/spark/bin/spark-submit --master %s --jars %s %s" % 
-        (master_path, jar_path, code_path))
+    spark_code_path =  project_dir + 'es_spark_test.py'
 
-    return {'current': 100, 'total': 100, 'status': 'Task completed!',
-            'result': 42}          
+    os.system("~/spark/bin/spark-submit --master %s --jars %s %s %s" % 
+        (master_path, jar_path, spark_code_path, self.request.id))
+
+    return {'current': 100, 'total': 100, 'status': 'Task completed!', 'result': 42}          
 
 
-# @app.route('/', methods=['GET', 'POST'])
-# def index():
-#     if request.method == 'GET':
-#         return render_template('index.html', email=session.get('email', ''))
-#     email = request.form['email']
-#     session['email'] = email
-
-#     # send the email
-#     msg = Message('Hello from Flask',
-#                   recipients=[request.form['email']])
-#     msg.body = 'This is a test email sent from a background Celery task.'
-#     if request.form['submit'] == 'Send':
-#         # send right away
-#         send_async_email.delay(msg)
-#         flash('Sending email to {0}'.format(email))
-#     else:
-#         # send in one minute
-#         send_async_email.apply_async(args=[msg], countdown=60)
-#         flash('An email will be sent to {0} in one minute'.format(email))
 
 @app.route('/', methods=['GET'])
 def index():
@@ -104,33 +70,35 @@ def index():
 
 
 
-@app.route('/longtask', methods=['POST'])
-def longtask():
-    task = long_task.apply_async()
-    return jsonify({}), 202, {'Location': url_for('taskstatus',
-                                                  task_id=task.id)}
+@app.route('/sparktask', methods=['POST'])
+def sparktask():
+    task = spark_job_task.apply_async()
+    if not es.indices.exists('spark-jobs'):
+        print("creating '%s' index..." % ('spark-jobs'))
+        res = es.indices.create(index='spark-jobs', body={
+            "settings" : {
+                "number_of_shards": 1,
+                "number_of_replicas": 0
+            }
+        })
+        print(res)
+
+    es.index(index='spark-jobs', doc_type='job', id=task.id, body={
+        'current': 0, 
+        'total': 100,
+        'status': 'Spark job pending..',
+        'start_time': datetime.utcnow()
+    })
+
+    return jsonify({}), 202, {'Location': url_for('taskstatus', task_id=task.id)}
 
 
 @app.route('/status/<task_id>')
 def taskstatus(task_id):
-    task = long_task.AsyncResult(task_id)
-    if task.state == 'PENDING':
-        response = {
-            'state': task.state,
-            'current': 0,
-            'total': 1,
-            'status': 'Pending...'
-        }
-    elif task.state != 'FAILURE':
-        response = {
-            'state': task.state,
-            'current': task.info.get('current', 0),
-            'total': task.info.get('total', 1),
-            'status': task.info.get('status', '')
-        }
-        if 'result' in task.info:
-            response['result'] = task.info['result']
-    else:
+    
+    task = spark_job_task.AsyncResult(task_id)
+
+    if task.state == 'FAILURE':
         # something went wrong in the background job
         response = {
             'state': task.state,
@@ -138,8 +106,18 @@ def taskstatus(task_id):
             'total': 1,
             'status': str(task.info),  # this is the exception raised
         }
+    else:
+        # otherwise get the task info from ES
+        es_task_info = es.get(index='spark-jobs',doc_type='job',id=task_id)
+        response = es_task_info['_source']
+        response['state'] = task.state
+
     return jsonify(response)
 
 
 if __name__ == '__main__':
     app.run(debug=True)
+
+
+# some helpful sense code:
+# http://sense.qbox.io/gist/4f7ed0e6aa51f6badd9d27de979741e4b8768205
